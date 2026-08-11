@@ -86,6 +86,13 @@ def cmd_health(args):
     out(data_health(League(args.league or None)))
 
 
+def cmd_web(args):
+    """Launch the local dashboard."""
+    from webapp.server import serve
+
+    serve(args.port, args.host, not args.no_browser)
+
+
 def cmd_selftest(args):
     """Run the test suite. Guards the solver and the scoring engine."""
     import subprocess
@@ -391,6 +398,17 @@ def main():
 
     s = sub.add_parser("health", help="can these numbers be trusted right now")
     s.set_defaults(func=cmd_health)
+
+    s = sub.add_parser("web", help="open the dashboard in your browser")
+    s.add_argument("--port", type=int, default=8770)
+    s.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="localhost by default; the server is unauthenticated, so binding to "
+        "0.0.0.0 exposes your league data to your whole network",
+    )
+    s.add_argument("--no-browser", action="store_true", dest="no_browser")
+    s.set_defaults(func=cmd_web)
 
     s = sub.add_parser("selftest", help="run the test suite")
     s.set_defaults(func=cmd_selftest)

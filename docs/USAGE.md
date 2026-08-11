@@ -11,6 +11,13 @@ no write endpoint and no token, because there is nothing to authorize. The tool
 tells you what to do; you tap the button in the app. Anything claiming full
 Sleeper automation is scraping private mobile endpoints.
 
+> **Prefer clicking to typing?** Everything below is also available in a local
+> web dashboard: `python cli.py web`. See **[WEB_UI.md](WEB_UI.md)**. This
+> document is the terminal reference and the deeper explanation of how the
+> analysis works — the sections on
+> [how the analysis works](#9-how-the-analysis-actually-works) and
+> [known data quirks](#10-known-data-quirks) are worth reading either way.
+
 **Contents**
 
 1. [Quick start](#1-quick-start)
@@ -50,6 +57,7 @@ python cli.py health
 Then, depending on where you are in the season:
 
 ```bash
+python cli.py web                   # the dashboard, if you would rather click
 python cli.py draft --plan          # before the draft: study every slot
 python cli.py draft --dissent       # before the draft: model vs market
 python cli.py draft --watch         # during the draft
@@ -63,7 +71,7 @@ python cli.py digest                # during the season: the full weekly brief
 
 ## 2. How it works
 
-```
+```text
 Sleeper API  ──sync──>  SQLite cache  ──>  analysis modules  ──>  CLI
 (read-only)             (data/sleeper.db)                     └─>  MCP server
                                                               └─>  scheduled jobs → phone
@@ -131,10 +139,12 @@ Global flag: `--league <id>` overrides `SLEEPER_LEAGUE_ID` for one invocation.
 ### Setup and data
 
 #### `setup --username <name> [--season YYYY]`
+
 Lists every Sleeper league for that username with the IDs to paste into `.env`.
 The only command that works before `.env` is configured.
 
 #### `sync [--full] [--weeks N] [--season-wide]`
+
 Refreshes the local cache. **Pulls all 18 weeks by default** during the
 preseason or whenever fewer than 14 weeks are cached.
 
@@ -146,21 +156,35 @@ Full season sync takes ~35 seconds. Caching every week is what makes bye weeks,
 playoff-week value, and full-horizon trade math work at all.
 
 #### `info`
+
 League settings summary: teams, scoring format, starting slots, bench size,
 waiver type, FAAB budget, playoff week.
 
 #### `health`
+
 **Run this when a number looks surprising.** Reports which projection weeks are
 cached, a per-position scoring audit against Sleeper's own numbers, row counts,
 data age, and explicit warnings.
 
 #### `selftest`
+
 Runs the full test suite (46 tests, ~30s), including a 300-case brute-force
 validation of the lineup solver.
+
+#### `web [--port N] [--host H] [--no-browser]`
+
+Starts the local dashboard and opens it. Defaults to
+`http://127.0.0.1:8770`. Covers everything in this document with a UI —
+see **[WEB_UI.md](WEB_UI.md)**.
+
+The server is **unauthenticated** and binds to localhost. `--host 0.0.0.0`
+exposes your league data to your whole network; only do that behind something
+that authenticates. On Windows, `Dashboard.cmd` is a double-click launcher.
 
 ### Draft
 
 #### `board [--position POS] [--top N] [--json]`
+
 The pre-draft cheat sheet, sorted by value over replacement. Replacement level
 is derived from your league's own roster slots × team count, not a generic
 assumption. Includes tiers (detected by gap analysis), ADP, bye week, and
@@ -172,6 +196,7 @@ python cli.py board --position RB --top 30
 ```
 
 #### `draft` — the main draft tool
+
 By default this **simulates the rest of the draft** and ranks the picks you
 could make now by how the finished roster tends to score.
 
@@ -200,7 +225,7 @@ python cli.py draft --fast              # instant heuristic, no simulation
 
 Reading the output:
 
-```
+```text
 Player                          Pos      ADP    Score  Regret  Lasts  Plan
 Christian McCaffrey (RB-SF)     RB       5.0   2617.5     0.0   0.00  RB-RB-WR-TE
 Puka Nacua (WR-LAR)             WR       4.9   2608.0     9.5   0.00  WR-RB-RB-TE
@@ -217,16 +242,19 @@ is very likely to last is the one to pass on. Two players 5 points apart where
 one has `Lasts 0.05` and the other `Lasts 0.90`? Take the first.
 
 #### `recap [--draft-id ID]`
+
 After the draft: value captured per draft slot, and every pick's reach or steal
 against ADP.
 
 ### Weekly
 
 #### `lineup [--week N] [--json]`
+
 Your optimal starting lineup, with injury and bye adjustments applied, plus the
 bench sorted by projection.
 
 #### `startsit [--week N] [--notify] [--threshold PTS]`
+
 Compares the lineup you actually have set in Sleeper against the optimal one.
 Reports `points_left_on_bench`, who to start, and who to sit with reasons.
 
@@ -234,22 +262,27 @@ Reports `points_left_on_bench`, who to start, and who to sit with reasons.
 - `--threshold` (default `1.5`) — minimum bench points before it interrupts you
 
 #### `waivers [--week N] [--top N] [--json]`
+
 Ranks free agents by **how much they would improve your starting lineup**, not
 by talent. Includes a suggested FAAB bid as a percentage of your *remaining*
 budget.
 
 #### `matchup [--week N]`
+
 This week's head-to-head: projected totals, win probability, slot-by-slot
 positional edges, and a strategic read.
 
 #### `standings`
+
 W/L/T, points for and against, waiver budget used.
 
 #### `byes [--through N]`
+
 Weeks where you have three or more players unavailable. Plan claims one to two
 weeks ahead of these.
 
 #### `digest [--week N] [--notify] [--json]`
+
 **The one command that matters most.** Syncs, then produces a full markdown
 brief: matchup, optimal lineup, waiver targets with bids, league activity since
 last time, trade angles, bye planning, and standings.
@@ -257,6 +290,7 @@ last time, trade angles, bye planning, and standings.
 ### Trades and players
 
 #### `trade --send "A,B" --receive "C" [--partner ROSTER_ID] [--week N]`
+
 Evaluates a trade by re-optimizing your lineup week by week, before and after,
 across the horizon. With `--partner` it also computes the other side, so you can
 tell whether they would plausibly accept.
@@ -266,9 +300,11 @@ python cli.py trade --send "Puka Nacua" --receive "Bijan Robinson" --partner 4
 ```
 
 #### `targets [--week N] [--top N]`
+
 Finds other teams' bench surplus that matches your weakest starting slots.
 
 #### `player <name> [--week N]`
+
 Single player outlook: this week's projection, rest-of-season total, and
 scoring consistency once actuals exist.
 
@@ -631,7 +667,7 @@ a known slot the tool cannot tell which picks are yours.
 
 ## 13. Architecture
 
-```
+```text
 cli.py                 17 subcommands
 mcp_server.py          22 MCP tools over stdio or streamable-http
 sleeper_agent/

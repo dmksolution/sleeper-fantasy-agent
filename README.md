@@ -5,8 +5,16 @@ Claude 22 tools for draft prep, lineup optimization, waiver claims, trade
 evaluation and weekly reporting, plus a CLI and a scheduler that pushes a brief
 to your phone before waivers run.
 
-**[Full usage guide →](docs/USAGE.md)** — every command, every flag, the draft
-night playbook, and the measured quirks in Sleeper's data that this works around.
+There is a **local web dashboard** covering everything, so the terminal is
+optional:
+
+```bash
+python cli.py web        # or double-click Dashboard.cmd on Windows
+```
+
+**[Dashboard guide →](docs/WEB_UI.md)** · **[Full CLI guide →](docs/USAGE.md)** —
+every command and flag, the draft night playbook, and the measured quirks in
+Sleeper's data that this works around.
 
 ## The one constraint that shapes everything
 
@@ -65,14 +73,20 @@ python cli.py setup --username <your_sleeper_username>
 
 # Populate the local cache: player index plus all 18 weeks of projections
 python cli.py sync
+
+# Open the dashboard
+python cli.py web
 ```
 
-Then confirm it read your league correctly, and that the numbers are sound:
+Or confirm things from the terminal:
 
 ```bash
-python cli.py info
-python cli.py health
+python cli.py info      # league settings
+python cli.py health    # can these numbers be trusted right now
 ```
+
+Three dependencies (`requests`, `truststore`, `mcp`). Everything else, including
+the dashboard and the tests, is standard library — no build step, no `npm`.
 
 ## Draft day
 
@@ -209,7 +223,7 @@ write no log.
 
 ## Layout
 
-```
+```text
 sleeper_agent/
   client.py       rate-limited read-only Sleeper client, retries and backoff
   store.py        SQLite cache with TTLs, stale-read fallback, decision log
@@ -225,12 +239,13 @@ sleeper_agent/
   trades.py       two-sided trade evaluation, trade target discovery
   matchup.py      head to head, win probability, standings, bye planning
   digest.py       the weekly markdown brief and notification push
+webapp/           local dashboard: stdlib HTTP server + vanilla JS, no build step
 mcp_server.py     22 MCP tools
 cli.py            the same functionality from a terminal
 tests/            46 tests, standard library unittest
 scripts/          crontab, Docker entrypoint, Windows Scheduled Tasks
 sql/schema.sql    tables, indexes, decision log
-docs/USAGE.md     the complete guide
+docs/             USAGE.md (CLI) and WEB_UI.md (dashboard)
 ```
 
 Everything reads from SQLite, so analysis is fast and still works if Sleeper is

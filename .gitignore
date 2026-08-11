@@ -13,3 +13,6 @@ files.zip
 
 # Scheduled task output.
 logs/
+
+# Local screenshots from headless testing.
+.shots/
