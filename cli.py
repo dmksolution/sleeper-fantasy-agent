@@ -80,6 +80,25 @@ def cmd_info(args):
     out(League(args.league or None).summary())
 
 
+def cmd_health(args):
+    from sleeper_agent.sync import data_health
+
+    out(data_health(League(args.league or None)))
+
+
+def cmd_selftest(args):
+    """Run the test suite. Guards the solver and the scoring engine."""
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    proc = subprocess.run(
+        [sys.executable, "-m", "unittest", "discover", "-s", str(root / "tests"), "-v"],
+        cwd=str(root),
+    )
+    raise SystemExit(proc.returncode)
+
+
 def cmd_board(args):
     league = League(args.league or None)
     board = draft_mod.value_board(league)
@@ -144,7 +163,23 @@ def cmd_lineup(args):
 
 def cmd_startsit(args):
     league, roster, week = ctx(args)
-    out(start_sit_advice(league, roster, week))
+    advice = start_sit_advice(league, roster, week)
+    out(advice)
+    if not args.notify:
+        return
+    # Scheduled on Sunday mornings to catch late scratches, so only interrupt
+    # when there is actually a swap to make.
+    left = advice.get("points_left_on_bench") or 0
+    if left < args.threshold:
+        print(f"\nnot notifying: only {left} pts on the bench")
+        return
+    lines = [f"**Week {week}: {left:.1f} projected points on your bench.**", ""]
+    for s in advice.get("start", []):
+        lines.append(f"- START {s['player']} into {s['slot']} ({s['points']:.1f})")
+    for s in advice.get("sit", []):
+        reason = f" -- {s['reason']}" if s.get("reason") else ""
+        lines.append(f"- SIT {s['player']} ({s['points']:.1f}){reason}")
+    print("\n---\nnotify:", json.dumps(notify("\n".join(lines), title=f"Lineup fix, week {week}")))
 
 
 def cmd_waivers(args):
@@ -255,6 +290,12 @@ def main():
     s = sub.add_parser("info", help="league settings summary")
     s.set_defaults(func=cmd_info)
 
+    s = sub.add_parser("health", help="can these numbers be trusted right now")
+    s.set_defaults(func=cmd_health)
+
+    s = sub.add_parser("selftest", help="run the test suite")
+    s.set_defaults(func=cmd_selftest)
+
     s = sub.add_parser("board", help="pre-draft value board")
     s.add_argument("--position", default="")
     s.add_argument("--top", type=int, default=40)
@@ -277,6 +318,13 @@ def main():
     s.set_defaults(func=cmd_lineup)
 
     s = sub.add_parser("startsit", help="swaps vs your current lineup")
+    s.add_argument("--notify", action="store_true", help="push if a swap is worth it")
+    s.add_argument(
+        "--threshold",
+        type=float,
+        default=1.5,
+        help="only notify when at least this many points are on the bench",
+    )
     s.add_argument("--week", type=int, default=0)
     s.set_defaults(func=cmd_startsit)
 

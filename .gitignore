@@ -10,3 +10,6 @@ venv/
 
 # Redundant snapshot of the same source tree that lives in this repo.
 files.zip
+
+# Scheduled task output.
+logs/

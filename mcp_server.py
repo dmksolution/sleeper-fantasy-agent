@@ -57,12 +57,28 @@ def _json(payload: Any) -> str:
 
 
 @mcp.tool()
-def sync_data(force: bool = False) -> str:
+def sync_data(force: bool = False, full_season: bool = True) -> str:
     """Refresh the local cache of players, projections and stats from Sleeper.
 
     Run once before a session. Everything else reads from the local cache.
+    `full_season` pulls all 18 weeks, which is what makes bye weeks, playoff
+    week value and full-horizon trade math correct.
     """
-    return _json(sync_all(force=force))
+    return _json(sync_all(force=force, full_season=full_season))
+
+
+@mcp.tool()
+def data_health(league_id: str = "") -> str:
+    """Report whether the cached data can be trusted before you rely on it.
+
+    Returns which projection weeks are cached, whether scoring reconciles
+    against Sleeper's own numbers per position, row counts, and explicit
+    warnings. Call this first if a recommendation looks surprising, or if you
+    need to say how confident an answer is.
+    """
+    from sleeper_agent.sync import data_health as _health
+
+    return _json(_health(League(league_id or None)))
 
 
 @mcp.tool()

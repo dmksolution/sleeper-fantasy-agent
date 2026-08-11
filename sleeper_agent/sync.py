@@ -255,6 +255,98 @@ def sync_actuals(season: str, week: int, force: bool = False) -> int:
 # --------------------------------------------------------------------- all
 
 
+def data_health(league=None) -> dict:
+    """Can these numbers be trusted right now?
+
+    Written for the MCP surface: an assistant reasoning about a recommendation
+    should be able to ask whether the cache is complete and whether scoring
+    reconciles, rather than discovering mid-answer that half the season is
+    missing and every rest-of-season total is short.
+    """
+    from .league import League
+    from .valuation import FULL, coverage, team_bye_weeks
+
+    league = league or League()
+    season = league.season
+    cov = projection_coverage(season)
+    weekly = {w: n for w, n in cov.items() if w > 0}
+    expected = set(range(1, settings.nfl_weeks + 1))
+
+    with connect() as conn:
+        counts = {
+            table: conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            for table in ("players", "projections", "adp", "actuals", "recommendations")
+        }
+        stale = conn.execute(
+            "SELECT MIN(updated_at) AS oldest FROM projections WHERE season = ? AND week > 0",
+            (season,),
+        ).fetchone()["oldest"]
+
+    # Scoring audit: our dot product against Sleeper's own number, per position.
+    # QB is expected to differ; see tests/test_scoring.py.
+    audit: dict[str, dict] = {}
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT p.stats, pl.position FROM projections p"
+            " JOIN players pl ON pl.player_id = p.player_id"
+            " WHERE p.season = ? AND p.week BETWEEN 1 AND 17",
+            (season,),
+        ).fetchall()
+    worst: dict[str, float] = {}
+    for r in rows:
+        stats = json.loads(r["stats"])
+        truth = stats.get("pts_ppr")
+        if not truth or truth <= 0:
+            continue
+        diff = abs(league.score(stats) - truth)
+        pos = r["position"] or "?"
+        if diff > worst.get(pos, 0.0):
+            worst[pos] = diff
+    for pos, diff in sorted(worst.items()):
+        tolerance = 3.0 if pos == "QB" else 1.2
+        audit[pos] = {
+            "worst_abs_diff_vs_sleeper": round(diff, 2),
+            "ok": diff <= tolerance,
+            "note": (
+                "expected: Sleeper's pts_ppr scores interceptions at +2, this"
+                " league at -1, so their number runs 3 x pass_int high"
+                if pos == "QB"
+                else ""
+            ),
+        }
+
+    byes = team_bye_weeks(league)
+    missing_weeks = sorted(expected - set(weekly))
+    return {
+        "season": season,
+        "projection_weeks_cached": sorted(weekly),
+        "projection_weeks_missing": missing_weeks,
+        "coverage_complete": not missing_weeks,
+        "season_value_source": "summed weekly projections (week 0 is ADP only)",
+        "valuation_coverage": coverage(league, FULL),
+        "nfl_teams_with_bye_detected": len(byes),
+        "oldest_projection_row": stale,
+        "row_counts": counts,
+        "scoring_audit": audit,
+        "warnings": [
+            w
+            for w in (
+                f"missing projection weeks {missing_weeks}; run `cli.py sync`"
+                if missing_weeks
+                else "",
+                "actuals table is empty, so consistency() and any"
+                " variance work have no data yet"
+                if not counts["actuals"]
+                else "",
+                f"only {len(byes)} of 32 teams have a detected bye"
+                if len(byes) < 32
+                else "",
+            )
+            if w
+        ],
+    }
+
+
 def _should_sync_full_season(season: str) -> bool:
     """Full season if we are in the preseason, or if coverage is thin.
 
