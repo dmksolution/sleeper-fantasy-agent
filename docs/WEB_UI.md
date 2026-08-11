@@ -7,7 +7,7 @@ during the season.
 python cli.py web
 ```
 
-Your browser opens at **http://127.0.0.1:8770**. On Windows you can also just
+Your browser opens at <http://127.0.0.1:8770>. On Windows you can also just
 double-click **`Dashboard.cmd`**.
 
 ---
@@ -40,8 +40,45 @@ Ctrl-C in the terminal stops it. Closing the browser tab does not — the server
 keeps running, which is deliberate: on draft night you want it warm.
 
 > **The server is unauthenticated and binds to localhost.** Anyone who can reach
-> the port can read your league data and trigger syncs. `--host 0.0.0.0` exposes
-> it to your whole network; only do that behind something that authenticates.
+> the port can read your league data and trigger syncs.
+
+### Reaching it from other devices at home
+
+Two things have to be true, and the first one catches most people:
+
+1. **Bind to the network.** The default `127.0.0.1` only accepts connections
+   from this machine, so another device gets connection-refused no matter what
+   the firewall says.
+
+   ```bash
+   python cli.py web --port 8781 --host 0.0.0.0
+   ```
+
+2. **Let Windows accept the connection.**
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\enable_lan_access.ps1 -Port 8781
+   ```
+
+   It self-elevates, works out your subnet, and adds one inbound rule scoped to
+   that subnet on the **Private** profile only — so the port stays shut if you
+   take the machine onto public Wi-Fi. Undo with `-Remove`.
+
+Then browse to `http://<this-machine's-LAN-IP>:8781` from any device on the
+network. Phones work; the layout collapses to a single column below 900px.
+
+To check it is genuinely reachable, run this **on the other device** — testing
+from the host itself is a loopback and will succeed even when the firewall is
+blocking everyone else:
+
+```powershell
+Test-NetConnection <LAN-IP> -Port 8781
+```
+
+`TcpTestSucceeded : True` is the answer you want.
+
+Do not port-forward this to the internet. If you want it from outside the house,
+put it behind a tunnel with authentication in front.
 
 **Keep it running on draft night.** The first request in a fresh process spends
 a few seconds reading the projection cache off disk; every later request is
