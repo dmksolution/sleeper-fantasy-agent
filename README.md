@@ -1,9 +1,12 @@
 # Sleeper Fantasy Agent
 
 An AI-assisted fantasy football toolkit built on the public Sleeper API. Gives
-Claude 18 tools for draft prep, lineup optimization, waiver claims, trade
+Claude 22 tools for draft prep, lineup optimization, waiver claims, trade
 evaluation and weekly reporting, plus a CLI and a scheduler that pushes a brief
 to your phone before waivers run.
+
+**[Full usage guide →](docs/USAGE.md)** — every command, every flag, the draft
+night playbook, and the measured quirks in Sleeper's data that this works around.
 
 ## The one constraint that shapes everything
 
@@ -24,7 +27,22 @@ scoring categories simply have no weight and contribute zero.
 **Exact lineup optimization.** Setting a lineup is an assignment problem, and
 greedy filling gets it wrong whenever flex slots overlap. This solves it exactly
 with the Hungarian algorithm. Validated against brute force on 300 randomized
-cases with zero mismatches.
+cases with zero mismatches — see `tests/test_hungarian.py`, and run it yourself
+with `python cli.py selftest`.
+
+**Season value summed from real weeks, not Sleeper's aggregate.** Sleeper
+publishes a season total that is exact for skill positions and structurally
+wrong for kickers and defenses: measured against Sleeper's own numbers it
+understates every kicker by about 22 points and hands all 32 defenses a phantom
+10-point shutout. Weekly lines are exact, so all season value is summed from
+them. Byes and fantasy-playoff value fall out for free. Details in
+[docs/USAGE.md](docs/USAGE.md#10-known-data-quirks).
+
+**Drafting by simulation, not by best-available.** `python cli.py draft` plays
+the rest of the draft out a few hundred times per candidate and ranks picks by
+how the finished roster tends to score across the season. That subsumes
+positional need, tier scarcity and player survival rather than approximating
+each with a tuned bonus.
 
 **Value over replacement everywhere.** Comparing a QB's 82 projected points to a
 TE's 51 is meaningless in a 1-QB league, because the QB you would stream instead
@@ -45,37 +63,49 @@ cp .env.example .env
 # Prints every league you are in, with the IDs to paste into .env
 python cli.py setup --username <your_sleeper_username>
 
-# Populate the local cache (~15 MB player index plus projections)
-python cli.py sync --full
+# Populate the local cache: player index plus all 18 weeks of projections
+python cli.py sync
 ```
 
-Then confirm it read your league correctly:
+Then confirm it read your league correctly, and that the numbers are sound:
 
 ```bash
 python cli.py info
+python cli.py health
 ```
 
 ## Draft day
 
-Build the value board the night before. You do not want to be waiting on network
-calls with 90 seconds on the clock.
+A week out, study what each draft slot tends to produce:
 
 ```bash
-python cli.py sync --full
-python cli.py board --top 60              # full board
-python cli.py board --position RB --top 30 # one position
+python cli.py draft --plan
 ```
 
-During the draft, this reads the live pick feed and filters to who is actually
-still available:
+The night before, review where the model and the market disagree, then warm
+everything so nothing is computed on the clock:
 
 ```bash
-watch -n 20 'python cli.py draft --top 12'
+python cli.py draft --dissent --top 15
+python cli.py draft --precompute
 ```
 
-It reports picks until your turn comes back around (snake-aware), your
-positional needs so far, and a tier-scarcity bonus that flags when you are about
-to lose the last player in a tier.
+`--dissent` is the best hour you will spend. Sleeper's projections fail in
+predictable, checkable ways — a rookie with no history, a receiver who just
+inherited a bigger role, a backfield that resolved in August — and this lists
+exactly where to look.
+
+During the draft, keep one process alive. It polls the live pick feed, reprints
+when a pick lands, and alarms when you are two picks out:
+
+```bash
+python cli.py draft --watch --slot 7
+```
+
+Each candidate is ranked by simulating the rest of the draft. Read `Regret`
+(points behind the best option) against `Lasts` (chance he survives to your next
+pick): a close second who is likely to last is the one to pass on. Pass `--slot`
+only until you have made a pick — after that the slot is inferred.
 
 Afterward:
 
@@ -130,8 +160,11 @@ Restart the client, then ask normally:
 
 - "Who should I start at flex this week?"
 - "Best waiver adds, and what should I bid out of my remaining FAAB?"
-- "Is trading McBride for Jonathan Taylor good for me?"
-- "Who is the best available player in my draft right now?"
+- "Is trading McBride for Jonathan Taylor good for me? Would they accept?"
+- "Who should I take with my next pick?" (runs the draft simulation)
+- "I'm picking 7th. What does my draft usually look like from there?"
+- "Where do your projections disagree with ADP most?"
+- "Can I trust these numbers right now?" (runs the health check)
 - "Give me my week brief."
 
 The MCP SDK renamed `FastMCP` to `MCPServer` in 2.0. `mcp_server.py` imports
@@ -159,24 +192,45 @@ localhost. It is unauthenticated. If you want to reach it from your phone, put
 it behind your Cloudflare Tunnel with Access in front of it rather than opening
 the port.
 
+## Running on Windows
+
+The container schedule is Linux-only. On Windows, register the same jobs as
+Scheduled Tasks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\schedule_tasks.ps1
+.\scripts\schedule_tasks.ps1 -Unregister   # to remove
+```
+
+If the project lives on a mapped network drive the script handles it — mapped
+drives do not exist in the session a Scheduled Task runs in, so it resolves the
+drive to its UNC root. Without that, tasks fail instantly with result `1` and
+write no log.
+
 ## Layout
 
 ```
 sleeper_agent/
   client.py       rate-limited read-only Sleeper client, retries and backoff
   store.py        SQLite cache with TTLs, stale-read fallback, decision log
-  sync.py         pulls players, projections, actuals and ADP into SQLite
+  sync.py         pulls players, projections, actuals and ADP; data_health()
   league.py       league settings and the custom scoring engine
-  projections.py  scored projections, rest-of-season, positional VOR
+  projections.py  scored projections (memoized), rest-of-season, positional VOR
+  valuation.py    season value summed from real weeks, byes, replacement levels
   lineup.py       Hungarian assignment optimizer, start/sit diffing
-  draft.py        VBD board, tier detection, live draft state
+  draft.py        VBD board, tiers, ADP blending, model-vs-market disagreements
+  draft_sim.py    Monte Carlo draft rollout, live watch mode, slot planning
+  survival.py     P(available at my next pick), calibrated against the live draft
   waivers.py      lineup-impact ranking, FAAB sizing, drop candidates
   trades.py       two-sided trade evaluation, trade target discovery
   matchup.py      head to head, win probability, standings, bye planning
   digest.py       the weekly markdown brief and notification push
-mcp_server.py     18 MCP tools
+mcp_server.py     22 MCP tools
 cli.py            the same functionality from a terminal
+tests/            46 tests, standard library unittest
+scripts/          crontab, Docker entrypoint, Windows Scheduled Tasks
 sql/schema.sql    tables, indexes, decision log
+docs/USAGE.md     the complete guide
 ```
 
 Everything reads from SQLite, so analysis is fast and still works if Sleeper is
@@ -188,12 +242,23 @@ having a bad day. `sync` is the only thing that touches the network.
   stable and free, but it is one source. Every caller degrades gracefully if it
   returns nothing, and a stale cached projection is preferred over no projection
   on a Sunday morning.
-- Win probability uses a normal approximation on the margin with a 26 point
-  standard deviation. It is calibrated well enough to separate a coin flip from
-  a real edge, which is all it needs to do.
+- Win probability uses a normal approximation on the margin with a hardcoded 26
+  point standard deviation. That is the weakest number in the codebase: it does
+  not vary with which players you are starting, and it is almost certainly too
+  small, which means **reported win probabilities overstate your edges**. Good
+  enough to separate a coin flip from a real edge, not good enough to bet on.
+- Kicker and defense scoring has a documented trap in Sleeper's season
+  aggregate. This tool sums real weekly lines instead, so `board` and every
+  rest-of-season number are correct where most tools are not. See
+  [docs/USAGE.md](docs/USAGE.md#10-known-data-quirks).
+- Sleeper's own `pts_ppr` scores interceptions at +2. Anything ranking
+  quarterbacks on that field overvalues turnover-prone passers by about 3 points
+  per projected interception. This scores against your league's settings instead.
 - FAAB suggestions are a percentage of your *remaining* budget, scaled by actual
   lineup impact and bid up when a player is trending hard league-wide.
 - `recommendations` in SQLite logs every call the agent makes, with a timestamp.
   Grade it against results later, and tune the weights.
 - Rate limiting is set to 300 requests per minute against Sleeper's stated
   ceiling of 1000. A normal session makes a handful of calls.
+- Run `python cli.py selftest` to verify the solver and the scoring engine, and
+  `python cli.py health` to check whether the cached data is currently sound.
