@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from .config import settings
 from .league import League
-from .store import connect
+from .store import connect, read_conn
 
 log = logging.getLogger(__name__)
 
@@ -51,12 +51,11 @@ def week_projections(
         if hit is not None:
             return hit
 
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT player_id, team, opponent, stats FROM projections"
-            " WHERE season = ? AND week = ?",
-            (league.season, week),
-        ).fetchall()
+    rows = read_conn().execute(
+        "SELECT player_id, team, opponent, stats FROM projections"
+        " WHERE season = ? AND week = ?",
+        (league.season, week),
+    ).fetchall()
     out: dict[str, Projection] = {}
     for r in rows:
         stats = json.loads(r["stats"])

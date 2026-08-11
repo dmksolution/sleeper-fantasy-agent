@@ -135,14 +135,90 @@ def draft_board(league_id: str = "", position: str = "", top_n: int = 40) -> str
 
 
 @mcp.tool()
-def draft_recommendation(league_id: str = "", draft_id: str = "", top_n: int = 12) -> str:
-    """Who to take with your next pick, accounting for who is already off the board.
+def draft_recommendation(
+    league_id: str = "",
+    draft_id: str = "",
+    top_n: int = 12,
+    assumed_slot: int = 0,
+) -> str:
+    """Fast heuristic pick suggestion. Prefer `draft_simulate` when there is time.
 
-    Use this live during the draft. Reflects positional need, tier scarcity and
-    how many picks until your turn comes back around.
+    Instant, but it scores players with hand-tuned need and scarcity bonuses
+    rather than playing the draft out. Use it when the clock is nearly up, or
+    as a sanity check against the simulator.
+
+    Set `assumed_slot` if the commissioner has not published the draft order.
     """
     league = League(league_id or None)
-    return _json(draft_mod.recommend_pick(league, draft_id or None, top_n=top_n))
+    return _json(
+        draft_mod.recommend_pick(
+            league, draft_id or None, top_n=top_n, assumed_slot=assumed_slot or None
+        )
+    )
+
+
+@mcp.tool()
+def draft_simulate(
+    league_id: str = "",
+    draft_id: str = "",
+    candidates: int = 8,
+    trials: int = 200,
+    assumed_slot: int = 0,
+) -> str:
+    """Rank your possible picks by simulating the rest of the draft.
+
+    The strongest draft tool here. For each candidate it forces that pick, plays
+    every remaining round out a few hundred times with opponents drafting to a
+    noisy ADP, then scores the finished roster by the starting lineups it would
+    produce across the season with real byes and extra weight on weeks 15-17.
+
+    Read two columns together: `regret_vs_best` (points behind the top option)
+    and `survival_to_next_pick` (chance he lasts until your next turn). A close
+    second choice who is very likely to last is the one to pass on.
+
+    Takes a few seconds. Set `assumed_slot` if the draft order is not set yet.
+    """
+    from sleeper_agent.draft_sim import evaluate_candidates
+
+    league = League(league_id or None)
+    return _json(
+        evaluate_candidates(
+            league,
+            draft_id or None,
+            candidates=candidates,
+            trials=trials,
+            assumed_slot=assumed_slot or None,
+        )
+    )
+
+
+@mcp.tool()
+def draft_plan(league_id: str = "", slot: int = 0, trials: int = 150) -> str:
+    """Before the draft: what each draft slot tends to produce.
+
+    Reports, for every slot, the expected roster strength and the position
+    sequence that typically comes back to you in the first rounds. Useful when
+    the draft order has not been set, which is usually until the last minute.
+    """
+    from sleeper_agent.draft_sim import draft_plan as _plan
+
+    return _json(_plan(League(league_id or None), slot=slot or None, trials=trials))
+
+
+@mcp.tool()
+def draft_disagreements(league_id: str = "", top_n: int = 15) -> str:
+    """Players where our projections most disagree with the market's ADP.
+
+    The best pre-draft homework in the toolkit. Sleeper's projections fail in
+    predictable, checkable ways -- rookies with no history, a receiver who just
+    inherited a bigger role, a backfield that resolved in August. Positive
+    `edge` means we like him more than the market (a possible value); negative
+    means the market likes him more (check whether we are missing news).
+
+    Kickers and defenses are excluded and reported separately, because value
+    over replacement systematically overrates them.
+    """
+    return _json(draft_mod.disagreements(League(league_id or None), top_n=top_n))
 
 
 @mcp.tool()

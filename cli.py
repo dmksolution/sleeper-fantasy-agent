@@ -119,26 +119,125 @@ def cmd_board(args):
         )
 
 
-def cmd_draft(args):
-    league = League(args.league or None)
-    result = draft_mod.recommend_pick(league, args.draft_id or None, top_n=args.top)
-    if args.json:
+def _print_sim(result):
+    if result.get("error"):
         out(result)
         return
-    print(f"Draft status: {result['draft_status']}, {result['picks_made']} picks made")
-    if result.get("picks_until_my_turn") is not None:
-        print(f"Picks until your turn: {result['picks_until_my_turn']}")
-    if result["my_roster_so_far"]:
-        print("Your picks: " + ", ".join(result["my_roster_so_far"]))
-    print(f"Needs: {result['positional_needs']}\n")
-    print(f"{'Player':<34}{'Pos':<5}{'Tier':<6}{'VBD':>7}{'Score':>8}{'ADP':>8}")
-    print("-" * 68)
+    nxt = result.get("your_following_pick")
+    print(
+        f"Slot {result['my_draft_slot']} ({result['slot_source']}) | "
+        f"evaluating your pick #{result['evaluating_your_pick_at']}"
+        + (f", next at #{nxt}" if nxt else ", your last pick")
+        + f" | currently on the clock: #{result['pick_on_the_clock']}"
+    )
+    cal = result.get("market_calibration") or {}
+    if cal.get("calibrated"):
+        print(f"Market spread: x{cal['scale']} - {cal['reading']}")
+    if result.get("candidates_dropped_as_unreachable"):
+        print(
+            f"({result['candidates_dropped_as_unreachable']} players dropped as"
+            " very unlikely to reach you)"
+        )
+    print()
+    print(f"{'Player':<32}{'Pos':<5}{'ADP':>7}{'Score':>9}{'Regret':>8}{'Lasts':>7}  Plan")
+    print("-" * 84)
     for r in result["recommendations"]:
         adp = f"{r['adp']:.1f}" if r["adp"] else "-"
         print(
-            f"{r['player'][:33]:<34}{r['position']:<5}{r['tier']:<6}"
-            f"{r['vbd']:>7.1f}{r['adjusted_score']:>8.1f}{adp:>8}"
+            f"{r['player'][:31]:<32}{r['position']:<5}{adp:>7}"
+            f"{r['expected_roster_score']:>9.1f}{r['regret_vs_best']:>8.1f}"
+            f"{r['survival_to_next_pick']:>7.2f}  {'-'.join(r['typical_next_rounds'])}"
         )
+    print(
+        "\nRegret is points behind the best option. Lasts is the chance he"
+        "\nsurvives to your next pick. A small regret with a low Lasts means"
+        "\ntake him now; a small regret with a high Lasts means you can wait."
+    )
+
+
+def cmd_draft(args):
+    league = League(args.league or None)
+
+    if args.dissent:
+        out(draft_mod.disagreements(league, top_n=args.top))
+        return
+
+    if args.plan:
+        from sleeper_agent.draft_sim import draft_plan
+
+        result = draft_plan(league, slot=args.slot, trials=args.trials)
+        if args.json:
+            out(result)
+            return
+        print(f"{league.name} - expected outcome by draft slot\n")
+        print(f"{'Slot':<6}{'Picks':<22}{'Score':>9}{'p10':>9}{'p90':>9}  Typical opening")
+        print("-" * 86)
+        for r in result["slots"]:
+            picks = ", ".join(str(p) for p in r["first_picks"])
+            print(
+                f"{r['slot']:<6}{picks:<22}{r['expected_roster_score']:>9.1f}"
+                f"{r['p10']:>9.1f}{r['p90']:>9.1f}  {'-'.join(r['typical_opening'])}"
+            )
+        print(f"\n{result['note']}")
+        return
+
+    if args.precompute:
+        from sleeper_agent.draft_sim import precompute
+
+        out(precompute(league, args.draft_id or None))
+        return
+
+    if args.watch:
+        from sleeper_agent.draft_sim import watch_draft
+
+        watch_draft(
+            league,
+            args.draft_id or None,
+            assumed_slot=args.slot,
+            trials=args.trials,
+            candidates=args.top,
+            interval=args.interval,
+        )
+        return
+
+    if args.fast:
+        result = draft_mod.recommend_pick(
+            league, args.draft_id or None, top_n=args.top, assumed_slot=args.slot
+        )
+        if args.json:
+            out(result)
+            return
+        print(f"Draft status: {result['draft_status']}, {result['picks_made']} picks made")
+        for w in result.get("warnings") or []:
+            print(f"  ! {w}")
+        if result.get("picks_until_my_turn") is not None:
+            print(f"Picks until your turn: {result['picks_until_my_turn']}")
+        if result["my_roster_so_far"]:
+            print("Your picks: " + ", ".join(result["my_roster_so_far"]))
+        print(f"Needs: {result['positional_needs']}\n")
+        print(f"{'Player':<34}{'Pos':<5}{'Tier':<6}{'VBD':>7}{'Score':>8}{'ADP':>8}")
+        print("-" * 68)
+        for r in result["recommendations"]:
+            adp = f"{r['adp']:.1f}" if r["adp"] else "-"
+            print(
+                f"{r['player'][:33]:<34}{r['position']:<5}{r['tier']:<6}"
+                f"{r['vbd']:>7.1f}{r['adjusted_score']:>8.1f}{adp:>8}"
+            )
+        return
+
+    from sleeper_agent.draft_sim import evaluate_candidates
+
+    result = evaluate_candidates(
+        league,
+        args.draft_id or None,
+        candidates=args.top,
+        trials=args.trials,
+        assumed_slot=args.slot,
+    )
+    if args.json:
+        out(result)
+        return
+    _print_sim(result)
 
 
 def cmd_recap(args):
@@ -302,9 +401,46 @@ def main():
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_board)
 
-    s = sub.add_parser("draft", help="live draft recommendation")
+    s = sub.add_parser(
+        "draft",
+        help="draft recommendation (simulated rollout by default)",
+        description=(
+            "By default this plays the rest of the draft out a few hundred times"
+            " and ranks the picks you could make now by how the finished roster"
+            " tends to score. --fast falls back to the instant heuristic."
+        ),
+    )
     s.add_argument("--draft-id", dest="draft_id", default="")
-    s.add_argument("--top", type=int, default=12)
+    s.add_argument("--top", type=int, default=8, help="how many candidates to rank")
+    s.add_argument("--trials", type=int, default=200, help="rollouts per candidate")
+    s.add_argument(
+        "--slot",
+        type=int,
+        default=None,
+        help="your draft slot, if the commissioner has not set the order yet",
+    )
+    s.add_argument(
+        "--plan",
+        action="store_true",
+        help="pre-draft: expected outcome and typical opening from every slot",
+    )
+    s.add_argument(
+        "--dissent",
+        action="store_true",
+        help="where our projections most disagree with ADP (review these by hand)",
+    )
+    s.add_argument(
+        "--watch",
+        action="store_true",
+        help="poll the live draft and reprint when a pick lands",
+    )
+    s.add_argument(
+        "--precompute",
+        action="store_true",
+        help="warm the board and caches before draft night",
+    )
+    s.add_argument("--fast", action="store_true", help="instant heuristic, no simulation")
+    s.add_argument("--interval", type=float, default=5.0, help="--watch poll seconds")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_draft)
 

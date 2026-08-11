@@ -16,7 +16,7 @@ from datetime import timedelta
 
 from .client import client
 from .config import settings
-from .store import cached, connect
+from .store import cached, connect, read_conn
 
 # Slots that are not real players.
 NON_PLAYER_SLOTS = {"BN", "IR", "TAXI"}
@@ -75,11 +75,10 @@ class Player:
 
 
 def _query_players() -> dict[str, Player]:
-    with connect() as conn:
-        rows = conn.execute(
-            "SELECT player_id, full_name, position, team, injury_status, fantasy_positions,"
-            " depth_chart_order, age FROM players"
-        ).fetchall()
+    rows = read_conn().execute(
+        "SELECT player_id, full_name, position, team, injury_status, fantasy_positions,"
+        " depth_chart_order, age FROM players"
+    ).fetchall()
     return {
         r["player_id"]: Player(
             player_id=r["player_id"],

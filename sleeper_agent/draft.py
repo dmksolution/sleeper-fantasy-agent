@@ -181,6 +181,138 @@ def value_board(
     return board
 
 
+# -------------------------------------------------- market blend and dissent
+
+
+# How much weight the market gets against our own projections. Sleeper is a
+# single, mediocre projection source; ADP aggregates a very large number of
+# drafters. Enough weight to survive Sleeper being idiosyncratically wrong about
+# one player, not enough to turn this into an ADP reader -- following the market
+# cannot beat the market.
+DEFAULT_MARKET_WEIGHT = 0.35
+
+
+def _vbd_at_rank(sorted_vbd: list[float], rank: float) -> float:
+    """VBD of the player at a (possibly fractional) overall rank.
+
+    Converts an ADP into value units without needing an external scale: if the
+    market drafts a player 20th overall, the market is implicitly valuing him at
+    whatever our 20th best player is worth.
+    """
+    if not sorted_vbd:
+        return 0.0
+    idx = max(0.0, rank - 1.0)
+    lo = int(idx)
+    if lo >= len(sorted_vbd) - 1:
+        return sorted_vbd[-1]
+    frac = idx - lo
+    return sorted_vbd[lo] * (1 - frac) + sorted_vbd[lo + 1] * frac
+
+
+def blended_value(
+    league: League,
+    board: list[DraftValue] | None = None,
+    market_weight: float = DEFAULT_MARKET_WEIGHT,
+) -> dict[str, float]:
+    """Our VBD, pulled part way toward what the market implies."""
+    board = board if board is not None else value_board(league)
+    sorted_vbd = sorted((b.vbd for b in board), reverse=True)
+
+    out: dict[str, float] = {}
+    for item in board:
+        if item.adp:
+            market = _vbd_at_rank(sorted_vbd, item.adp)
+            out[item.player_id] = round(
+                (1 - market_weight) * item.vbd + market_weight * market, 2
+            )
+        else:
+            # No ADP means the market has no opinion, so there is nothing to
+            # blend toward. Use our own number rather than inventing one.
+            out[item.player_id] = round(item.vbd, 2)
+    return out
+
+
+SKILL_POSITIONS = ("QB", "RB", "WR", "TE")
+
+
+def disagreements(
+    league: League,
+    board: list[DraftValue] | None = None,
+    top_n: int = 15,
+    min_adp_rank: int = 200,
+    positions: tuple[str, ...] = SKILL_POSITIONS,
+) -> dict:
+    """Where our projections and the market disagree most.
+
+    The highest value-per-hour output in the draft toolkit, because Sleeper's
+    projections fail in predictable, human-checkable ways: rookies with no
+    history, a WR2 who just inherited the WR1 role, a backfield committee that
+    resolved in August. Ten minutes of news reading against this list catches
+    almost all of them, and each one is either a value pick or a trap avoided.
+
+    Positive `edge` means we like him more than the market does (a potential
+    steal); negative means the market likes him more (a potential reach, or a
+    signal that Sleeper has missed news).
+    """
+    board = board if board is not None else value_board(league)
+    # Rank across the whole board so "our rank" stays comparable to an overall
+    # ADP, then filter. Ranking within the filtered subset would inflate every
+    # edge by however many players were removed.
+    ranked = sorted(board, key=lambda b: -b.vbd)
+
+    rows = []
+    skipped_kdef = 0
+    for our_rank, item in enumerate(ranked, start=1):
+        if not item.adp or item.adp > min_adp_rank:
+            continue
+        if item.position not in positions:
+            if item.position in ("K", "DEF"):
+                skipped_kdef += 1
+            continue
+        edge = item.adp - our_rank
+        rows.append(
+            {
+                "player": f"{item.name} ({item.position}-{item.team or 'FA'})",
+                "player_id": item.player_id,
+                "position": item.position,
+                "our_rank": our_rank,
+                "adp": round(item.adp, 1),
+                "edge": round(edge, 1),
+                "projected_points": round(item.projected_points, 1),
+                "vbd": round(item.vbd, 1),
+                "bye_week": item.bye_week,
+                "read": (
+                    "we like him well above the market; check for news Sleeper missed"
+                    if edge > 0
+                    else "the market likes him well above us; check for a role change"
+                ),
+            }
+        )
+
+    undervalued = sorted(rows, key=lambda r: -r["edge"])[:top_n]
+    overvalued = sorted(rows, key=lambda r: r["edge"])[:top_n]
+    return {
+        "note": (
+            "edge = ADP minus our value rank. Positive means he lasts longer than"
+            " he should. Review these by hand before the draft."
+        ),
+        "positions_considered": list(positions),
+        "kickers_and_defenses_excluded": skipped_kdef,
+        "why_excluded": (
+            "VBD ranks the top kickers and defenses around pick 60-110, and the"
+            " market takes them 120-190. The market is right and VBD is not"
+            " wrong so much as blind: value over replacement says nothing about"
+            " how predictable that value is, and K/DEF projections have almost"
+            " no year-over-year signal. They are also the two most streamable"
+            " positions, which matters more here than usual with only 5 bench"
+            " spots. Left in, they would crowd out every genuine disagreement."
+        ),
+        "market_weight_used_elsewhere": DEFAULT_MARKET_WEIGHT,
+        "we_like_more_than_market": undervalued,
+        "market_likes_more_than_us": overvalued,
+    }
+
+
 # --------------------------------------------------------------- live draft
 
 
@@ -207,9 +339,25 @@ class DraftState:
     on_the_clock_slot: int | None = None
     next_pick_overall: int | None = None
     picks_until_my_turn: int | None = None
+    slot_source: str = "unknown"
+    picks: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
-def draft_status(league: League, draft_id: str | None = None) -> DraftState | None:
+def draft_status(
+    league: League, draft_id: str | None = None, assumed_slot: int | None = None
+) -> DraftState | None:
+    """Live draft state.
+
+    Finding your own slot is more fragile than it looks. Commissioners often do
+    not set the draft order until minutes before the draft, so `draft_order` is
+    null right up until it matters, and every slot-dependent feature has to keep
+    working anyway. Three sources, in descending order of trust:
+
+      draft_order  the commissioner set it, believe it
+      inferred     you have already picked, so derive the slot from your pick
+      assumed      the caller passed one in
+    """
     did = resolve_draft_id(league, draft_id)
     if not did:
         return None
@@ -219,13 +367,44 @@ def draft_status(league: League, draft_id: str | None = None) -> DraftState | No
     teams = int(dsettings.get("teams") or league.team_count)
     rounds = int(dsettings.get("rounds") or 15)
 
+    warnings: list[str] = []
+    # The league settings blob carries a `draft_rounds` that disagrees with the
+    # draft object (3 vs 15 here). The draft object is authoritative, but a
+    # silent mismatch would quietly truncate every rollout.
+    league_rounds = (league.raw.get("settings") or {}).get("draft_rounds")
+    if league_rounds and int(league_rounds) != rounds:
+        warnings.append(
+            f"league settings say draft_rounds={league_rounds} but the draft object"
+            f" says rounds={rounds}; using {rounds}"
+        )
+
     drafted = {p.get("player_id") for p in picks if p.get("player_id")}
 
     my_slot = None
+    slot_source = "unknown"
     my_roster = league.my_roster()
     draft_order = draft.get("draft_order") or {}
-    if my_roster and my_roster.get("owner_id") in draft_order:
-        my_slot = int(draft_order[my_roster["owner_id"]])
+    owner_id = (my_roster or {}).get("owner_id")
+
+    if owner_id and owner_id in draft_order:
+        my_slot = int(draft_order[owner_id])
+        slot_source = "draft_order"
+    elif owner_id:
+        # Infer from a pick we have already made. Works even when the
+        # commissioner never publishes an order.
+        for p in picks:
+            if p.get("picked_by") == owner_id and p.get("draft_slot"):
+                my_slot = int(p["draft_slot"])
+                slot_source = "inferred"
+                break
+    if my_slot is None and assumed_slot:
+        my_slot = int(assumed_slot)
+        slot_source = "assumed"
+    if my_slot is None:
+        warnings.append(
+            "draft order is not set and you have no picks yet, so your slot is"
+            " unknown. Pass --slot, or run `cli.py draft --plan` to study all slots."
+        )
 
     my_picks = [
         p["player_id"]
@@ -257,6 +436,9 @@ def draft_status(league: League, draft_id: str | None = None) -> DraftState | No
         on_the_clock_slot=on_clock,
         next_pick_overall=next_overall,
         picks_until_my_turn=picks_until,
+        slot_source=slot_source,
+        picks=picks,
+        warnings=warnings,
     )
 
 
@@ -271,10 +453,18 @@ def _picks_until(next_overall: int, my_slot: int, teams: int, rounds: int, snake
 
 
 def recommend_pick(
-    league: League, draft_id: str | None = None, top_n: int = 12
+    league: League,
+    draft_id: str | None = None,
+    top_n: int = 12,
+    assumed_slot: int | None = None,
 ) -> dict:
-    """Best available, filtered by what is actually left and what you need."""
-    state = draft_status(league, draft_id)
+    """Best available, filtered by what is actually left and what you need.
+
+    The fast heuristic. `draft_sim.evaluate_candidates()` answers the same
+    question properly by playing the draft out; this stays as the instant
+    fallback for when the clock is short or the simulator is unavailable.
+    """
+    state = draft_status(league, draft_id, assumed_slot)
     board = value_board(league)
     if state:
         available = [b for b in board if b.player_id not in state.drafted_ids]
@@ -308,6 +498,8 @@ def recommend_pick(
         "draft_status": state.status if state else "not started",
         "picks_made": state.picks_made if state else 0,
         "my_draft_slot": state.my_slot if state else None,
+        "slot_source": state.slot_source if state else "unknown",
+        "warnings": state.warnings if state else [],
         "picks_until_my_turn": state.picks_until_my_turn if state else None,
         "my_roster_so_far": [p.label() for p in my_players.values()],
         "positional_needs": needs,

@@ -406,9 +406,12 @@ def sync_all(
     # Anything holding parsed rows in memory is now stale.
     from .league import clear_player_cache
     from .projections import clear_projection_cache
-    from .valuation import clear_bye_cache
+    from .store import close_read_conn
+    from .valuation import clear_bye_cache, clear_value_cache
 
     clear_projection_cache()
     clear_player_cache()
     clear_bye_cache()
+    clear_value_cache()
+    close_read_conn()  # the shared reader would otherwise hold a pre-sync view
     return result

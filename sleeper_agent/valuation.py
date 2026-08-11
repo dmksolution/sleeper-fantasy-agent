@@ -144,6 +144,17 @@ def coverage(league: League, weeks: Iterable[int] = FULL) -> dict:
     }
 
 
+# The full-league computation walks 17 weeks x 3,300 players. value_board(),
+# free_agents() and the draft simulator all want it, so compute it once and
+# slice. Keyed on the week set because playoff-only and full-season views are
+# genuinely different answers.
+_VALUE_CACHE: dict[tuple[str, str, tuple[int, ...], bool], dict[str, SeasonValue]] = {}
+
+
+def clear_value_cache() -> None:
+    _VALUE_CACHE.clear()
+
+
 def season_value(
     league: League,
     weeks: Iterable[int] = FULL,
@@ -157,6 +168,13 @@ def season_value(
     """
     weeks = tuple(weeks)
     wanted = set(player_ids) if player_ids is not None else None
+
+    cache_key = (league.league_id, league.season, weeks, fallback_to_aggregate)
+    cached_all = _VALUE_CACHE.get(cache_key)
+    if cached_all is not None:
+        if wanted is None:
+            return cached_all
+        return {pid: sv for pid, sv in cached_all.items() if pid in wanted}
     players = load_players()
 
     weekly_maps: dict[int, dict] = {}
@@ -230,6 +248,10 @@ def season_value(
             weekly=per_week,
             derived_from=derived,
         )
+
+    # Only the unfiltered result is a complete answer worth caching.
+    if wanted is None:
+        _VALUE_CACHE[cache_key] = out
     return out
 
 

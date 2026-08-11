@@ -29,6 +29,34 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# Opening and closing a connection per query is cheap on a local disk and
+# expensive on a network share, where this database often lives: profiling the
+# draft simulator's startup showed ~2.3s of pure connect/close across 19 reads.
+# Read-only callers share one connection instead. Writers keep using connect(),
+# so there is still exactly one place that commits.
+_READ_CONN: sqlite3.Connection | None = None
+
+
+def read_conn() -> sqlite3.Connection:
+    global _READ_CONN
+    if _READ_CONN is None:
+        conn = sqlite3.connect(
+            settings.db_file(), timeout=30, check_same_thread=False
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        _READ_CONN = conn
+    return _READ_CONN
+
+
+def close_read_conn() -> None:
+    """Drop the shared reader, so the next read sees committed writes."""
+    global _READ_CONN
+    if _READ_CONN is not None:
+        _READ_CONN.close()
+        _READ_CONN = None
+
+
 def init_db() -> Path:
     path = settings.db_file()
     with connect() as conn:
