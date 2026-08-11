@@ -130,6 +130,65 @@ def _effective_points(player: Player, proj: Projection | None) -> tuple[float, s
     return pts, ""
 
 
+def eligibility_map(slots: list[str], players: dict[str, Player]) -> dict[str, set[str]]:
+    """pid -> the set of slot names that player may legally fill."""
+    distinct = set(slots)
+    return {
+        pid: {slot for slot in distinct if player.eligible_for(slot)}
+        for pid, player in players.items()
+    }
+
+
+def optimize_points(
+    slots: list[str],
+    eligibility: dict[str, set[str]],
+    scores: dict[str, float],
+) -> tuple[float, list[str | None]]:
+    """Exact best assignment of players to slots. The hot inner primitive.
+
+    Deliberately knows nothing about League, Player, or projections: it is just
+    slots, who may fill them, and what they are worth. That keeps it callable
+    from simulation loops that solve this tens of thousands of times, where
+    rebuilding domain objects per solve would dominate the runtime.
+
+    Returns (total points, player_id per slot with None for an unfilled slot).
+    """
+    if not slots:
+        return 0.0, []
+    pool = list(eligibility)
+    if not pool:
+        return 0.0, [None] * len(slots)
+
+    # Pad the player side so the matrix is always rows(slots) <= cols(players).
+    padded = pool + [""] * max(0, len(slots) - len(pool))
+
+    cost = []
+    for slot in slots:
+        row = []
+        for pid in padded:
+            allowed = eligibility.get(pid)
+            if not allowed or slot not in allowed:
+                row.append(BIG_COST)              # forbidden pairing
+            else:
+                row.append(-scores.get(pid, 0.0))  # negate: min cost == max points
+        cost.append(row)
+
+    assignment = hungarian(cost)
+
+    total = 0.0
+    filled: list[str | None] = []
+    for idx, slot in enumerate(slots):
+        col = assignment[idx]
+        pid = padded[col] if 0 <= col < len(padded) else ""
+        allowed = eligibility.get(pid)
+        if not pid or not allowed or slot not in allowed:
+            filled.append(None)
+            continue
+        filled.append(pid)
+        total += scores.get(pid, 0.0)
+    return round(total, 2), filled
+
+
 def optimize(
     league: League,
     player_ids: list[str],
@@ -151,31 +210,18 @@ def optimize(
     if not pool or not slots:
         return OptimalLineup(week, [], [], 0.0)
 
-    # Pad the player side so the matrix is always rows(slots) <= cols(players).
-    padded = list(pool)
-    while len(padded) < len(slots):
-        padded.append("")
-
-    cost = []
-    for slot in slots:
-        row = []
-        for pid in padded:
-            player = players.get(pid)
-            if player is None or not player.eligible_for(slot):
-                row.append(BIG_COST)         # forbidden pairing
-            else:
-                row.append(-scored[pid][0])  # negate: min cost == max points
-        cost.append(row)
-
-    assignment = hungarian(cost)
+    ordered = {pid: players[pid] for pid in pool}
+    eligibility = eligibility_map(slots, ordered)
+    _, filled = optimize_points(
+        slots, eligibility, {pid: scored[pid][0] for pid in pool}
+    )
 
     used: set[str] = set()
     results: list[SlotAssignment] = []
     for idx, slot in enumerate(slots):
-        col = assignment[idx]
-        pid = padded[col] if 0 <= col < len(padded) else ""
-        player = players.get(pid)
-        if player is None or not player.eligible_for(slot):
+        pid = filled[idx]
+        player = players.get(pid) if pid else None
+        if player is None:
             results.append(SlotAssignment(slot, None, 0.0, note="no eligible player"))
             continue
         pts, note = scored[pid]

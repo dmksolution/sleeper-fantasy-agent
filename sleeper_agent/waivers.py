@@ -16,6 +16,7 @@ from .config import settings
 from .league import League, load_players
 from .lineup import optimize
 from .projections import positional_vor, rest_of_season, week_projections
+from .valuation import replacement_baseline, season_value
 from .store import log_recommendation
 
 # Positions worth picking up in a standard league.
@@ -56,8 +57,9 @@ class WaiverTarget:
 
 def free_agents(league: League, positions: set[str] = STREAMABLE) -> list[str]:
     rostered = league.rostered_player_ids()
-    proj = week_projections(league, 0)
-    candidate_ids = [pid for pid in proj if pid not in rostered]
+    # Enumerate from real season value rather than the week-0 aggregate, whose
+    # kicker and defense rows are structurally wrong (see `valuation`).
+    candidate_ids = [pid for pid in season_value(league) if pid not in rostered]
     players = load_players(candidate_ids)
     return [
         pid
@@ -98,7 +100,11 @@ def recommend_waivers(
     fa_ros = rest_of_season(league, fa_ids, week)
     fa_players = load_players(fa_ids)
     fa_pos = {pid: p.position for pid, p in fa_players.items()}
-    fa_vor = positional_vor(league, fa_ros, fa_pos)
+    # "waiver" mode: the alternative to this claim is another free agent, not a
+    # league-average starter.
+    fa_vor = positional_vor(
+        league, fa_ros, fa_pos, replacement_baseline(league, fa_ros, fa_pos, "waiver")
+    )
     shortlist = sorted(fa_ids, key=lambda pid: -fa_vor.get(pid, 0))[:candidate_pool]
 
     players = fa_players
@@ -193,6 +199,17 @@ def _faab_pct(target: WaiverTarget, week: int, league: League) -> float:
 
 
 def _faab_spent(league: League, roster: dict) -> int:
+    """FAAB already committed this season.
+
+    Sleeper tracks this on the roster, so read it. The fallback below walks 17
+    weeks of transactions, which costs 17 round trips on the hot path and
+    conflates two different things: `waiver_budget` entries are FAAB *traded* to
+    another team, while `settings.waiver_bid` is what a claim actually cost.
+    """
+    reported = (roster.get("settings") or {}).get("waiver_budget_used")
+    if reported is not None:
+        return int(reported or 0)
+
     rid = roster.get("roster_id")
     spent = 0
     for w in range(1, settings.regular_season_weeks + 1):
@@ -229,7 +246,13 @@ def drop_candidates(league: League, roster: dict, week: int, top_n: int = 4) -> 
         **{pid: p.position for pid, p in fa_players.items()},
         **{pid: p.position for pid, p in players.items()},
     }
-    vor = positional_vor(league, combined, combined_pos)
+    # Replacement level comes from the free agent pool ALONE. Deriving it from
+    # the pool unioned with your own roster made your own players raise the bar
+    # they were then measured against, so a deep bench looked droppable purely
+    # because it was deep.
+    fa_pos = {pid: p.position for pid, p in fa_players.items()}
+    baseline = replacement_baseline(league, fa_ros, fa_pos, "waiver")
+    vor = positional_vor(league, combined, combined_pos, baseline)
 
     rows = []
     for pid in my_ids:

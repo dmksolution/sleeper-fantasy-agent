@@ -73,7 +73,7 @@ def cmd_setup(args):
 
 
 def cmd_sync(args):
-    out(sync_all(force=args.full, weeks_ahead=args.weeks))
+    out(sync_all(force=args.full, weeks_ahead=args.weeks, full_season=args.season_wide))
 
 
 def cmd_info(args):
@@ -236,7 +236,20 @@ def main():
 
     s = sub.add_parser("sync", help="refresh the local cache")
     s.add_argument("--full", action="store_true", help="ignore TTLs and refetch")
-    s.add_argument("--weeks", type=int, default=4, help="weeks of projections to pull")
+    s.add_argument(
+        "--weeks",
+        type=int,
+        default=None,
+        help="pull only this many weeks ahead instead of the whole season",
+    )
+    s.add_argument(
+        "--season-wide",
+        dest="season_wide",
+        action="store_const",
+        const=True,
+        default=None,
+        help="force all 18 weeks (the default in the preseason or when coverage is thin)",
+    )
     s.set_defaults(func=cmd_sync)
 
     s = sub.add_parser("info", help="league settings summary")

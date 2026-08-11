@@ -63,6 +63,10 @@ class Settings:
     regular_season_weeks: int = field(
         default_factory=lambda: int(_env("REGULAR_SEASON_WEEKS", "17") or 17)
     )
+    # How many weeks the projections endpoint publishes. Sleeper serves all of
+    # them from the preseason onward, so we cache the whole season rather than
+    # pro-rating an aggregate for the weeks we have not looked at yet.
+    nfl_weeks: int = field(default_factory=lambda: int(_env("NFL_WEEKS", "18") or 18))
 
     def db_file(self) -> Path:
         p = Path(self.db_path)

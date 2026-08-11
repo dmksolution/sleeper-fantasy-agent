@@ -74,18 +74,12 @@ class Player:
         return f"{self.name} {self.position}-{self.team or 'FA'}{tag}"
 
 
-def load_players(player_ids: list[str] | None = None) -> dict[str, Player]:
-    sql = (
-        "SELECT player_id, full_name, position, team, injury_status, fantasy_positions,"
-        " depth_chart_order, age FROM players"
-    )
-    params: tuple = ()
-    if player_ids:
-        marks = ",".join("?" * len(player_ids))
-        sql += f" WHERE player_id IN ({marks})"
-        params = tuple(player_ids)
+def _query_players() -> dict[str, Player]:
     with connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(
+            "SELECT player_id, full_name, position, team, injury_status, fantasy_positions,"
+            " depth_chart_order, age FROM players"
+        ).fetchall()
     return {
         r["player_id"]: Player(
             player_id=r["player_id"],
@@ -99,6 +93,35 @@ def load_players(player_ids: list[str] | None = None) -> dict[str, Player]:
         )
         for r in rows
     }
+
+
+# optimize() calls this on every invocation, and the draft simulator calls
+# optimize() tens of thousands of times. Reading the whole table once and
+# slicing in memory turns a per-call query into a per-process one. Player is
+# treated as an immutable value object; nothing in the package mutates one.
+_PLAYER_CACHE: dict[str, Player] | None = None
+
+
+def clear_player_cache() -> None:
+    """Drop memoized players. Called by sync_all() after new rows land."""
+    global _PLAYER_CACHE
+    _PLAYER_CACHE = None
+
+
+def load_players(
+    player_ids: list[str] | None = None, *, refresh: bool = False
+) -> dict[str, Player]:
+    global _PLAYER_CACHE
+    if refresh or _PLAYER_CACHE is None:
+        _PLAYER_CACHE = _query_players()
+    if player_ids is None:
+        return _PLAYER_CACHE
+    out: dict[str, Player] = {}
+    for pid in player_ids:
+        found = _PLAYER_CACHE.get(pid)
+        if found is not None:
+            out[pid] = found
+    return out
 
 
 class League:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from .client import FANTASY_POSITIONS, client
 from .config import settings
@@ -132,16 +132,56 @@ def _write_projection_rows(season: str, week: int, records: list[dict]) -> int:
     return len(rows)
 
 
+def _projection_age(season: str, week: int) -> timedelta | None:
+    """How long ago week `week` was written, or None if we have never had it."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT MAX(updated_at) AS ts FROM projections WHERE season = ? AND week = ?",
+            (season, week),
+        ).fetchone()
+    if not row or not row["ts"]:
+        return None
+    try:
+        ts = datetime.fromisoformat(row["ts"])
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - ts
+
+
+def projection_coverage(season: str) -> dict[int, int]:
+    """week -> row count, for honest reporting about what we can actually compute."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT week, COUNT(*) AS n FROM projections WHERE season = ? GROUP BY week"
+            " ORDER BY week",
+            (season,),
+        ).fetchall()
+    return {int(r["week"]): int(r["n"]) for r in rows}
+
+
 def sync_week_projections(season: str, week: int, force: bool = False) -> int:
+    """Refresh one week of projections.
+
+    Deliberately does not go through `cached()`. That would keep the ~3 MB raw
+    payload in kv_cache on top of the parsed rows in `projections`, and at 18
+    weeks the duplication costs more than the whole rest of the database. The
+    `projections` table is itself the cache; we just ask how old it is.
+    """
     max_age = (
         timedelta(seconds=0) if force else timedelta(hours=settings.projection_cache_hours)
     )
-    records = cached(
-        f"proj:{season}:{week}",
-        max_age,
-        lambda: client.projections(season, week, FANTASY_POSITIONS),
-    )
-    return _write_projection_rows(season, week, records or [])
+    age = _projection_age(season, week)
+    if age is not None and age < max_age:
+        return 0
+
+    records = client.projections(season, week, FANTASY_POSITIONS)
+    if not records:
+        # Stale rows beat no rows on a Sunday morning; leave what we have.
+        log.warning("no projections returned for %s week %s, keeping cached rows", season, week)
+        return 0
+    return _write_projection_rows(season, week, records)
 
 
 def sync_season_projections(season: str, force: bool = False) -> int:
@@ -215,22 +255,53 @@ def sync_actuals(season: str, week: int, force: bool = False) -> int:
 # --------------------------------------------------------------------- all
 
 
-def sync_all(force: bool = False, weeks_ahead: int = 4) -> dict:
-    """One call that leaves the cache ready for every other tool."""
+def _should_sync_full_season(season: str) -> bool:
+    """Full season if we are in the preseason, or if coverage is thin.
+
+    Sleeper publishes every week's projections from the preseason onward, so
+    there is no reason to run on a four week window and pro-rate the rest. The
+    only cost is 18 cheap GETs.
+    """
+    if (current_state().get("season_type") or "") == "pre":
+        return True
+    covered = [w for w in projection_coverage(season) if w > 0]
+    return len(covered) < 14
+
+
+def sync_all(
+    force: bool = False,
+    weeks_ahead: int | None = None,
+    full_season: bool | None = None,
+) -> dict:
+    """One call that leaves the cache ready for every other tool.
+
+    By default this pulls every week of the season. `weeks_ahead` narrows it to
+    a rolling window when you only want a quick in-season refresh.
+    """
     init_db()
     season = resolve_season()
     week = current_week()
 
+    if full_season is None:
+        full_season = weeks_ahead is None and _should_sync_full_season(season)
+
+    if full_season:
+        weeks = list(range(1, settings.nfl_weeks + 1))
+    else:
+        span = weeks_ahead if weeks_ahead is not None else 4
+        weeks = list(range(week, min(week + span, settings.nfl_weeks + 1)))
+
     result = {
         "season": season,
         "week": week,
+        "full_season": full_season,
         "players": sync_players(force=force),
         "season_projections": sync_season_projections(season, force=force),
         "week_projections": {},
         "actuals": {},
     }
 
-    for w in range(week, min(week + weeks_ahead, settings.regular_season_weeks + 1)):
+    for w in weeks:
         result["week_projections"][w] = sync_week_projections(season, w, force=force)
 
     for w in range(max(1, week - 3), week):
@@ -238,4 +309,14 @@ def sync_all(force: bool = False, weeks_ahead: int = 4) -> dict:
         if count:
             result["actuals"][w] = count
 
+    result["coverage"] = projection_coverage(season)
+
+    # Anything holding parsed rows in memory is now stale.
+    from .league import clear_player_cache
+    from .projections import clear_projection_cache
+    from .valuation import clear_bye_cache
+
+    clear_projection_cache()
+    clear_player_cache()
+    clear_bye_cache()
     return result

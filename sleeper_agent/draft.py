@@ -23,6 +23,7 @@ from .client import client
 from .config import settings
 from .league import League, Player, load_players, slot_eligibility
 from .store import connect
+from .valuation import SeasonValue, season_value
 
 FLEX_SLOTS = {"FLEX", "WRRB_FLEX", "REC_FLEX", "WRRB_WRT", "SUPER_FLEX"}
 CORE_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
@@ -41,6 +42,9 @@ class DraftValue:
     tier: int
     bye_risk: str = ""
     value_vs_adp: float | None = None
+    bye_week: int | None = None
+    playoff_points: float = 0.0
+    games: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -53,6 +57,8 @@ class DraftValue:
             "vbd": round(self.vbd, 1),
             "adp": self.adp,
             "value_vs_adp": self.value_vs_adp,
+            "bye_week": self.bye_week,
+            "playoff_points": round(self.playoff_points, 1),
         }
 
 
@@ -113,15 +119,16 @@ def value_board(
     positions: tuple[str, ...] = CORE_POSITIONS,
     limit_per_position: int = 60,
 ) -> list[DraftValue]:
-    """The pre-draft cheat sheet, sorted by value over replacement."""
+    """The pre-draft cheat sheet, sorted by value over replacement.
+
+    Season value comes from summing real weekly projections, not from the
+    `week = 0` aggregate. See `valuation` for why: that aggregate understates
+    every kicker by roughly a third and hands every defense a phantom shutout.
+    """
     fmt = league.scoring_format()
+    values = season_value(league)
+    players = load_players()
     with connect() as conn:
-        proj_rows = conn.execute(
-            "SELECT p.player_id, p.stats, pl.full_name, pl.position, pl.team"
-            " FROM projections p JOIN players pl ON pl.player_id = p.player_id"
-            " WHERE p.season = ? AND p.week = 0",
-            (league.season,),
-        ).fetchall()
         adp_rows = conn.execute(
             "SELECT player_id, adp, pos_adp FROM adp WHERE season = ? AND format = ?",
             (league.season, fmt),
@@ -129,39 +136,40 @@ def value_board(
 
     adp_map = {r["player_id"]: (r["adp"], r["pos_adp"]) for r in adp_rows}
 
-    by_pos: dict[str, list[tuple[str, str, str | None, float]]] = {}
-    for r in proj_rows:
-        pos = r["position"]
-        if pos not in positions:
+    by_pos: dict[str, list[SeasonValue]] = {}
+    for pid, sv in values.items():
+        player = players.get(pid)
+        if not player or sv.position not in positions or sv.points <= 0:
             continue
-        pts = league.score(json.loads(r["stats"]))
-        if pts <= 0:
-            continue
-        by_pos.setdefault(pos, []).append((r["player_id"], r["full_name"], r["team"], pts))
+        by_pos.setdefault(sv.position, []).append(sv)
 
     levels = replacement_levels(league)
     board: list[DraftValue] = []
 
     for pos, entries in by_pos.items():
-        entries.sort(key=lambda t: -t[3])
+        entries.sort(key=lambda sv: -sv.points)
         entries = entries[:limit_per_position]
         idx = min(levels.get(pos, 12), len(entries)) - 1
-        replacement = entries[idx][3] if idx >= 0 else 0.0
-        tiers = _assign_tiers([e[3] for e in entries])
+        replacement = entries[idx].points if idx >= 0 else 0.0
+        tiers = _assign_tiers([sv.points for sv in entries])
 
-        for rank, (pid, name, team, pts) in enumerate(entries, start=1):
-            adp, pos_adp = adp_map.get(pid, (None, None))
+        for rank, sv in enumerate(entries, start=1):
+            adp, pos_adp = adp_map.get(sv.player_id, (None, None))
+            player = players[sv.player_id]
             board.append(
                 DraftValue(
-                    player_id=pid,
-                    name=name,
+                    player_id=sv.player_id,
+                    name=player.name,
                     position=pos,
-                    team=team,
-                    projected_points=pts,
-                    vbd=pts - replacement,
+                    team=player.team,
+                    projected_points=sv.points,
+                    vbd=sv.points - replacement,
                     adp=adp,
                     pos_rank=rank,
                     tier=tiers[rank - 1] if rank - 1 < len(tiers) else 99,
+                    bye_week=sv.bye_weeks[0] if sv.bye_weeks else None,
+                    playoff_points=sv.playoff_points,
+                    games=sv.games,
                 )
             )
 

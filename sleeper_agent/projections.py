@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 
 from .config import settings
 from .league import League
 from .store import connect
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,7 +28,29 @@ class Projection:
         return bool(self.opponent) or bool(self.stats.get("gp"))
 
 
-def week_projections(league: League, week: int) -> dict[str, Projection]:
+# Parsing one week costs a 3,300 row scan plus a json.loads and a dot product
+# per row -- about 150 ms. A single digest asks for it a couple of hundred times
+# and the draft simulator asks for it tens of thousands of times, so it has to
+# be memoized. Deliberately not functools.lru_cache: League is unhashable, and
+# an lru_cache would hand every caller the same mutable dict under a key that
+# ignores which league asked.
+_PROJ_CACHE: dict[tuple[str, str, int], dict[str, Projection]] = {}
+
+
+def clear_projection_cache() -> None:
+    """Drop memoized projections. Called by sync_all() after new rows land."""
+    _PROJ_CACHE.clear()
+
+
+def week_projections(
+    league: League, week: int, *, refresh: bool = False
+) -> dict[str, Projection]:
+    key = (league.league_id, league.season, week)
+    if not refresh:
+        hit = _PROJ_CACHE.get(key)
+        if hit is not None:
+            return hit
+
     with connect() as conn:
         rows = conn.execute(
             "SELECT player_id, team, opponent, stats FROM projections"
@@ -43,6 +68,7 @@ def week_projections(league: League, week: int) -> dict[str, Projection]:
             team=r["team"],
             stats=stats,
         )
+    _PROJ_CACHE[key] = out
     return out
 
 
@@ -60,62 +86,62 @@ def rest_of_season(
 ) -> dict[str, float]:
     """Sum weekly projections across the horizon.
 
-    Falls back to a pro-rated slice of the season aggregate for any week that has
-    not been published yet, which is normal in the preseason.
+    Byes fall out for free: a player with no game that week contributes nothing,
+    which is exactly right and is why this no longer pro-rates a season
+    aggregate. That fallback used to fire for most of the horizon (only four
+    weeks were ever cached) and it implicitly assumed everyone plays every week.
     """
     horizon = horizon or settings.ros_horizon_weeks
     end_week = min(start_week + horizon, settings.regular_season_weeks + 1)
     weeks = list(range(start_week, end_week))
 
     totals = {pid: 0.0 for pid in player_ids}
-    missing_weeks = 0
+    missing = []
     for w in weeks:
         proj = week_projections(league, w)
         if not proj:
-            missing_weeks += 1
+            missing.append(w)
             continue
         for pid in player_ids:
-            if pid in proj:
-                totals[pid] += proj[pid].points
+            entry = proj.get(pid)
+            if entry is not None and entry.has_game:
+                totals[pid] += entry.points
 
-    if missing_weeks:
-        season = season_projections(league)
-        per_week = settings.regular_season_weeks
-        for pid in player_ids:
-            if pid in season:
-                totals[pid] += (season[pid].points / per_week) * missing_weeks
+    if missing:
+        log.warning(
+            "rest_of_season: weeks %s are not cached, so this total covers only"
+            " %s of %s weeks. Run `cli.py sync`.",
+            missing,
+            len(weeks) - len(missing),
+            len(weeks),
+        )
 
     return {pid: round(v, 2) for pid, v in totals.items()}
+
+
+def weeks_available(league: League, weeks: list[int]) -> list[int]:
+    """Subset of `weeks` we actually hold projections for."""
+    return [w for w in weeks if week_projections(league, w)]
 
 
 def positional_vor(
     league: League,
     values: dict[str, float],
     positions: dict[str, str],
-    depth: dict[str, int] | None = None,
+    baseline: dict[str, float],
 ) -> dict[str, float]:
     """Convert raw point totals into value over replacement, by position.
 
     Comparing a QB's 80 projected points to a TE's 45 is meaningless in a 1-QB
-    league: the QB you would stream instead also scores 70. Replacement level is
-    the Nth best player available at that position, where N reflects how deep
-    the position runs on waivers.
+    league: the QB you would stream instead also scores 70.
+
+    `baseline` is the replacement level per position, in points, and is
+    required. Build it with `valuation.replacement_baseline()` and pick the mode
+    deliberately -- "startable" for draft and trade questions, "waiver" for
+    waiver and drop questions. This used to default to a hardcoded depth table
+    that no caller overrode, which meant draft advice and waiver advice were
+    quietly measured against different definitions of replacement.
     """
-    default_depth = {"QB": 4, "RB": 8, "WR": 10, "TE": 4, "K": 3, "DEF": 4}
-    depth = {**default_depth, **(depth or {})}
-
-    grouped: dict[str, list[float]] = {}
-    for pid, val in values.items():
-        pos = positions.get(pid)
-        if pos:
-            grouped.setdefault(pos, []).append(val)
-
-    baseline: dict[str, float] = {}
-    for pos, vals in grouped.items():
-        vals.sort(reverse=True)
-        idx = min(depth.get(pos, 6), len(vals)) - 1
-        baseline[pos] = vals[idx] if idx >= 0 else 0.0
-
     return {
         pid: round(val - baseline.get(positions.get(pid, ""), 0.0), 2)
         for pid, val in values.items()

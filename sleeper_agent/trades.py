@@ -17,14 +17,22 @@ from .store import log_recommendation
 
 def _starting_points_over_horizon(
     league: League, player_ids: list[str], start_week: int, horizon: int
-) -> float:
+) -> tuple[float, int]:
+    """Sum the optimal starting lineup across the horizon.
+
+    Returns (points, weeks actually evaluated). The count matters: weeks with no
+    cached projections are skipped, and dividing that shorter sum by the nominal
+    horizon compressed every verdict toward "roughly neutral".
+    """
     total = 0.0
+    counted = 0
     end = min(start_week + horizon, settings.regular_season_weeks + 1)
     for week in range(start_week, end):
         if not week_projections(league, week):
             continue
         total += optimize(league, player_ids, week).projected_total
-    return round(total, 2)
+        counted += 1
+    return round(total, 2), counted
 
 
 def resolve_player(query: str) -> str | None:
@@ -65,8 +73,8 @@ def evaluate_trade(
 
     my_after = [p for p in my_ids if p not in send] + list(receive_ids)
 
-    before = _starting_points_over_horizon(league, my_ids, week, horizon)
-    after = _starting_points_over_horizon(league, my_after, week, horizon)
+    before, weeks_counted = _starting_points_over_horizon(league, my_ids, week, horizon)
+    after, _ = _starting_points_over_horizon(league, my_after, week, horizon)
 
     players = load_players(send_ids + receive_ids)
     ros = rest_of_season(league, send_ids + receive_ids, week, horizon)
@@ -74,6 +82,7 @@ def evaluate_trade(
     result = {
         "week": week,
         "horizon_weeks": horizon,
+        "weeks_evaluated": weeks_counted,
         "you_send": [
             {"player": players[p].label() if p in players else p, "ros_points": ros.get(p, 0)}
             for p in send_ids
@@ -90,9 +99,14 @@ def evaluate_trade(
         "net_starting_points": round(after - before, 2),
         "roster_slots_change": len(receive_ids) - len(send_ids),
     }
-    result["verdict"] = _trade_verdict(result["net_starting_points"], horizon)
+    result["verdict"] = _trade_verdict(result["net_starting_points"], weeks_counted)
     if unknown:
         result["warning"] = f"not on your roster: {unknown}"
+    if weeks_counted < horizon:
+        result["coverage_warning"] = (
+            f"only {weeks_counted} of {horizon} weeks have cached projections;"
+            " run `cli.py sync` for a full-horizon verdict"
+        )
 
     if partner_roster_id is not None:
         partner = next(
@@ -101,8 +115,8 @@ def evaluate_trade(
         if partner:
             p_ids = [p for p in (partner.get("players") or []) if p]
             p_after = [p for p in p_ids if p not in receive_ids] + list(send_ids)
-            p_before_pts = _starting_points_over_horizon(league, p_ids, week, horizon)
-            p_after_pts = _starting_points_over_horizon(league, p_after, week, horizon)
+            p_before_pts, _ = _starting_points_over_horizon(league, p_ids, week, horizon)
+            p_after_pts, _ = _starting_points_over_horizon(league, p_after, week, horizon)
             result["partner"] = {
                 "team": league.roster_name(partner_roster_id),
                 "net_starting_points": round(p_after_pts - p_before_pts, 2),
@@ -116,8 +130,9 @@ def evaluate_trade(
     return result
 
 
-def _trade_verdict(net: float, horizon: int) -> str:
-    per_week = net / max(horizon, 1)
+def _trade_verdict(net: float, weeks_evaluated: int) -> str:
+    """Verdict from points per week actually evaluated, not per nominal week."""
+    per_week = net / max(weeks_evaluated, 1)
     if per_week >= 3:
         return "clear win, accept"
     if per_week >= 1:
