@@ -1,0 +1,28 @@
+# Fantasy football schedule. Times are local (TZ set in the environment).
+# The NFL week drives all of this:
+#   Tue 03:00  waivers process overnight Tue into Wed on most Sleeper leagues
+#   Wed 07:00  waiver results are in, plan next week's claims
+#   Sun 11:00  ninety minutes before the 1pm ET lock, last call on the lineup
+#   Mon 08:00  post-game recap and early look at next week
+
+# Keep the cache warm. Cheap, and means every other job starts with fresh data.
+0 */6 * * *   cd /app && python cli.py sync >> /var/log/cron.log 2>&1
+
+# Tuesday morning: the full brief. This is the one that matters most, because
+# it lands before waiver claims are due.
+0 7 * * 2     cd /app && python cli.py digest --notify >> /var/log/cron.log 2>&1
+
+# Wednesday morning: did the claims land, and what changed league-wide.
+0 7 * * 3     cd /app && python cli.py digest --notify >> /var/log/cron.log 2>&1
+
+# Sunday late morning: final lineup check against injury news and inactives.
+0 11 * * 0    cd /app && python cli.py digest --notify >> /var/log/cron.log 2>&1
+
+# Sunday hourly through the afternoon slate: catch late scratches.
+0 12,13 * * 0 cd /app && python cli.py startsit >> /var/log/cron.log 2>&1
+
+# Monday morning: recap and reset.
+0 8 * * 1     cd /app && python cli.py sync --full >> /var/log/cron.log 2>&1
+
+# Blank line below is required by cron.
+

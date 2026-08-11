@@ -1,0 +1,12 @@
+.env
+data/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Redundant snapshot of the same source tree that lives in this repo.
+files.zip

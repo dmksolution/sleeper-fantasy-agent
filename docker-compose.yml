@@ -1,0 +1,41 @@
+services:
+  # The scheduler. Syncs on a timer and pushes the weekly brief to your phone.
+  fantasy-agent:
+    build: .
+    container_name: fantasy-agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: America/New_York
+      DB_PATH: /data/sleeper.db
+    volumes:
+      # Adjust the host path to wherever you keep container data on the NAS.
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3,os; sqlite3.connect(os.environ['DB_PATH']).execute('select 1')"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+
+  # Optional. Only needed if you want Claude to reach the MCP server over the
+  # network rather than launching it locally over stdio. For a single-user
+  # setup on your own machine, stdio is simpler and you can skip this.
+  #
+  # This port is NOT authenticated. Do not expose it to the internet without
+  # putting it behind your Cloudflare Tunnel with Access in front of it.
+  fantasy-mcp:
+    build: .
+    container_name: fantasy-mcp
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: America/New_York
+      DB_PATH: /data/sleeper.db
+      MCP_TRANSPORT: http
+      MCP_PORT: "8848"
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8848:8848"
+    command: ["python", "mcp_server.py"]
+    profiles: ["remote"]

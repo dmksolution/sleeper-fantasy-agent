@@ -1,0 +1,11 @@
+# Core runtime. The Sleeper API needs no auth, so there is nothing else to install.
+requests>=2.31.0
+
+# Verify TLS against the OS certificate store. Required on machines where
+# antivirus HTTPS scanning or a corporate proxy re-signs traffic with a private
+# root that certifi does not know about.
+truststore>=0.9.0
+
+# Only needed to run mcp_server.py. Skip if you are using the CLI alone.
+# SDK 2.x exposes MCPServer; 1.x exposes FastMCP. mcp_server.py handles both.
+mcp>=1.2.0
